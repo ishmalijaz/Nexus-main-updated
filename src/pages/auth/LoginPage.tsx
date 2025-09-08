@@ -1,370 +1,275 @@
 "use client"
 
-import React, { useState } from "react"
-import { Link, useNavigate } from "react-router-dom"
-import { User, CircleDollarSign, Building2, LogIn, AlertCircle } from "lucide-react"
-import { useAuth } from "../../context/AuthContext"
-import { Button } from "../../components/ui/Button"
-import { Input } from "../../components/ui/Input"
-import type { UserRole } from "../../types"
+import type React from "react"
+import { createContext, useContext, useState, useEffect } from "react"
+import type { User, UserRole } from "../../types"
+import { users } from "../../data/users"
+import toast from "react-hot-toast"
 
-const OTPInput: React.FC<{
-  value: string
-  onChange: (value: string) => void
-  length?: number
-}> = ({ value, onChange, length = 6 }) => {
-  const inputRefs = React.useRef<(HTMLInputElement | null)[]>([])
+interface AuthState {
+  user: User | null
+  isLoading: boolean
+  isAuthenticated: boolean
+}
 
-  const handleChange = (index: number, digit: string) => {
-    if (!/^\d*$/.test(digit)) return
+interface AuthContextType extends AuthState {
+  login: (email: string, password: string, role: UserRole) => Promise<void>
+  register: (name: string, email: string, password: string, role: UserRole) => Promise<void>
+  logout: () => void
+  sendOTP: (email: string) => Promise<void>
+  verifyOTP: (email: string, otp: string) => Promise<boolean>
+  resendOTP: () => Promise<void>
+  pendingOTPEmail: string | null
+}
 
-    const newValue = value.split("")
-    newValue[index] = digit
-    onChange(newValue.join(""))
+const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
-    // Auto-focus next input
-    if (digit && index < length - 1) {
-      inputRefs.current[index + 1]?.focus()
+// Local storage keys
+const USER_STORAGE_KEY = "business_nexus_user"
+const RESET_TOKEN_KEY = "business_nexus_reset_token"
+
+class OTPService {
+  private otpStore = new Map<string, { code: string; expires: number; attempts: number }>()
+
+  async sendOTP(email: string): Promise<void> {
+    // Generate 6-digit OTP
+    let code: string
+    if (email === "ishmalijaz167@gmail.com") {
+      code = "123456" // Hardcoded OTP for this specific email
+    } else {
+      code = Math.floor(100000 + Math.random() * 900000).toString()
+    }
+
+    const expires = Date.now() + 5 * 60 * 1000 // 5 minutes
+    const attempts = 0
+
+    // Store OTP (in production, use Redis or database)
+    this.otpStore.set(email, { code, expires, attempts })
+
+    console.log(`[OTP Service] Sending OTP ${code} to ${email}`)
+
+    try {
+      // Simulate email sending API call
+      await this.sendEmailOTP(email, code)
+      toast.success("OTP sent to your email!")
+    } catch (error) {
+      // Fallback: show OTP in console for development
+      console.log(`[DEV] OTP for ${email}: ${code}`)
+      toast.success(`OTP sent! Check console for development code.`)
     }
   }
 
-  const handleKeyDown = (index: number, e: React.KeyboardEvent) => {
-    if (e.key === "Backspace" && !value[index] && index > 0) {
-      inputRefs.current[index - 1]?.focus()
+  private async sendEmailOTP(email: string, code: string): Promise<void> {
+    // Simulate API delay
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+
+    if (email === "ishmalijaz167@gmail.com") {
+      console.log(`🔐 HARDCODED OTP for ${email}: ${code}`)
+      console.log(`Use this code to login: ${code}`)
+    } else {
+      console.log(`📧 Email sent to ${email}:`)
+      console.log(`Subject: Business Nexus - Your Login Code`)
+      console.log(`Body: Your verification code is: ${code}`)
+      console.log(`This code expires in 5 minutes.`)
+    }
+
+    // Simulate potential email sending failure for testing
+    if (Math.random() < 0.1) {
+      // 10% chance of failure for demo
+      throw new Error("Email service temporarily unavailable")
     }
   }
 
-  return (
-    <div className="flex gap-2 justify-center">
-      {Array.from({ length }, (_, index) => (
-        <input
-          key={index}
-          ref={(el) => (inputRefs.current[index] = el)}
-          type="text"
-          maxLength={1}
-          value={value[index] || ""}
-          onChange={(e) => handleChange(index, e.target.value)}
-          onKeyDown={(e) => handleKeyDown(index, e)}
-          className="w-12 h-12 text-center text-lg font-semibold border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-        />
-      ))}
-    </div>
-  )
+  async verifyOTP(email: string, inputCode: string): Promise<boolean> {
+    const stored = this.otpStore.get(email)
+
+    if (!stored) {
+      throw new Error("No OTP found for this email")
+    }
+
+    if (Date.now() > stored.expires) {
+      this.otpStore.delete(email)
+      throw new Error("OTP has expired")
+    }
+
+    // Increment attempts
+    stored.attempts += 1
+
+    // Max 3 attempts
+    if (stored.attempts > 3) {
+      this.otpStore.delete(email)
+      throw new Error("Too many failed attempts. Please request a new OTP.")
+    }
+
+    const isValid = stored.code === inputCode
+
+    if (isValid) {
+      this.otpStore.delete(email) // Clean up after successful verification
+    } else {
+      this.otpStore.set(email, stored) // Update attempts count
+    }
+
+    return isValid
+  }
+
+  async resendOTP(email: string): Promise<void> {
+    // Remove existing OTP before sending new one
+    this.otpStore.delete(email)
+    await this.sendOTP(email)
+  }
 }
 
-const fillDemoCredentials = (role: UserRole) => {
-  const demoEmails = {
-    entrepreneur: "entrepreneur-demo@example.com",
-    investor: "investor-demo@example.com",
-  }
-  const demoPassword = "demo123"
+const otpService = new OTPService()
 
-  return {
-    email: demoEmails[role],
-    password: demoPassword,
-  }
-}
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [pendingOTPEmail, setPendingOTPEmail] = useState<string | null>(null)
 
-export const LoginPage: React.FC = () => {
-  const [email, setEmail] = useState("")
-  const [password, setPassword] = useState("")
-  const [role, setRole] = useState<UserRole>("entrepreneur")
-  const [error, setError] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [showTwoFA, setShowTwoFA] = useState(false)
-  const [otpCode, setOtpCode] = useState("")
-  const [isVerifyingOTP, setIsVerifyingOTP] = useState(false)
-  const [isSendingOTP, setIsSendingOTP] = useState(false)
+  useEffect(() => {
+    const storedUser = localStorage.getItem(USER_STORAGE_KEY)
+    if (storedUser) {
+      setUser(JSON.parse(storedUser))
+    }
+    setIsLoading(false)
+  }, [])
 
-  const { login, verifyOTP, resendOTP, pendingOTPEmail } = useAuth()
-  const navigate = useNavigate()
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError(null)
+  const login = async (email: string, password: string, role: UserRole): Promise<void> => {
     setIsLoading(true)
 
     try {
-      await login(email, password, role)
+      await new Promise((resolve) => setTimeout(resolve, 1000))
 
-      if (pendingOTPEmail) {
-        setShowTwoFA(true)
-        setIsLoading(false)
-        return
+      const foundUser = users.find((u) => u.email === email && u.role === role)
+
+      if (foundUser) {
+        if (foundUser.twoFactorEnabled) {
+          await otpService.sendOTP(email)
+          setPendingOTPEmail(email)
+          toast.success("OTP sent! Please check your email.")
+        } else {
+          setUser(foundUser)
+          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(foundUser))
+          toast.success("Successfully logged in!")
+        }
+      } else {
+        throw new Error("Invalid credentials or user not found")
       }
-
-      // If no OTP required, navigate directly
-      navigate(role === "entrepreneur" ? "/entrepreneur-dashboard" : "/investor-dashboard")
-    } catch (err) {
-      setError((err as Error).message)
+    } catch (error) {
+      toast.error((error as Error).message)
+      throw error
+    } finally {
       setIsLoading(false)
     }
   }
 
-  const handleOTPVerification = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (otpCode.length !== 6) {
-      setError("Please enter a valid 6-digit code")
+  const verifyOTP = async (email: string, otp: string): Promise<boolean> => {
+    console.log("[v0] AuthContext verifyOTP called with email:", email, "otp:", otp)
+    setIsLoading(true)
+
+    try {
+      const isValid = await otpService.verifyOTP(email, otp)
+      console.log("[v0] OTP service returned:", isValid)
+
+      if (isValid) {
+        const foundUser = users.find((u) => u.email === email)
+        console.log("[v0] Found user:", foundUser?.name)
+        if (foundUser) {
+          setUser(foundUser)
+          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(foundUser))
+          setPendingOTPEmail(null)
+          toast.success("Successfully logged in with 2FA!")
+          console.log("[v0] User set successfully, returning true")
+          setIsLoading(false) // Set loading false before returning
+          return true
+        }
+      } else {
+        toast.error("Invalid OTP. Please try again.")
+        console.log("[v0] Invalid OTP entered")
+      }
+    } catch (error) {
+      console.log("[v0] OTP verification error:", error)
+      toast.error((error as Error).message)
+    }
+
+    setIsLoading(false)
+    return false
+  }
+
+  const sendOTP = async (email: string): Promise<void> => {
+    await otpService.sendOTP(email)
+  }
+
+  const resendOTP = async (): Promise<void> => {
+    if (!pendingOTPEmail) {
+      toast.error("No pending OTP request found")
       return
     }
+    await otpService.resendOTP(pendingOTPEmail)
+  }
 
-    console.log("[v0] Starting OTP verification with code:", otpCode)
-    setIsVerifyingOTP(true)
-    setError(null)
+  const register = async (name: string, email: string, password: string, role: UserRole): Promise<void> => {
+    setIsLoading(true)
 
     try {
-      console.log("[v0] Calling verifyOTP with email:", pendingOTPEmail || email)
-      const isValidOTP = await verifyOTP(pendingOTPEmail || email, otpCode)
-      console.log("[v0] verifyOTP result:", isValidOTP)
+      await new Promise((resolve) => setTimeout(resolve, 1000))
 
-      if (isValidOTP) {
-        console.log("[v0] OTP verified successfully, navigating to dashboard")
-        setIsVerifyingOTP(false)
-        navigate(role === "entrepreneur" ? "/entrepreneur-dashboard" : "/investor-dashboard")
-      } else {
-        console.log("[v0] OTP verification failed")
-        setIsVerifyingOTP(false)
+      if (users.some((u) => u.email === email)) {
+        throw new Error("Email already in use")
       }
-    } catch (err) {
-      console.log("[v0] OTP verification error:", err)
-      setError((err as Error).message)
-      setIsVerifyingOTP(false)
+
+      const newUser: User = {
+        id: `${role[0]}${users.length + 1}`,
+        name,
+        email,
+        role,
+        avatarUrl: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`,
+        bio: "",
+        isOnline: true,
+        twoFactorEnabled: true,
+        createdAt: new Date().toISOString(),
+      }
+
+      users.push(newUser)
+
+      setUser(newUser)
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser))
+      toast.success("Account created successfully!")
+    } catch (error) {
+      toast.error((error as Error).message)
+      throw error
+    } finally {
+      setIsLoading(false)
     }
   }
 
-  const handleResendOTP = async () => {
-    try {
-      setIsSendingOTP(true)
-      setError(null)
-      await resendOTP()
-      setIsSendingOTP(false)
-    } catch (err) {
-      setError((err as Error).message)
-      setIsSendingOTP(false)
-    }
+  const logout = (): void => {
+    setUser(null)
+    setPendingOTPEmail(null)
+    localStorage.removeItem(USER_STORAGE_KEY)
+    toast.success("Logged out successfully")
   }
 
-  const resetTwoFA = () => {
-    setShowTwoFA(false)
-    setOtpCode("")
-    setError(null)
+  const value: AuthContextType = {
+    user,
+    login,
+    register,
+    logout,
+    sendOTP,
+    verifyOTP,
+    resendOTP,
+    pendingOTPEmail,
+    isAuthenticated: !!user,
+    isLoading,
   }
 
-  return (
-    <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
-      <div className="sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="flex justify-center">
-          <div className="w-12 h-12 bg-primary-600 rounded-md flex items-center justify-center">
-            <svg
-              width="32"
-              height="32"
-              viewBox="0 0 24 24"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-              className="text-white"
-            >
-              <path
-                d="M20 7H4C2.89543 7 2 7.89543 2 9V19C2 20.1046 2.89543 21 4 21H20C21.1046 21 22 20.1046 22 19V9C22 7.89543 21.1046 7 20 7Z"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <path
-                d="M16 21V5C16 3.89543 15.1046 3 14 3H10C8.89543 3 8 3.89543 8 5V21"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-        </div>
-        <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-          {showTwoFA ? "Enter Verification Code" : "Sign in to Business Nexus"}
-        </h2>
-        <p className="mt-2 text-center text-sm text-gray-600">
-          {showTwoFA ? "We sent a 6-digit code to your email" : "Connect with investors and entrepreneurs"}
-        </p>
-      </div>
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
 
-      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
-        <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
-          {error && (
-            <div className="mb-4 bg-error-50 border border-error-500 text-error-700 px-4 py-3 rounded-md flex items-start">
-              <AlertCircle size={18} className="mr-2 mt-0.5" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          {!showTwoFA ? (
-            <form className="space-y-6" onSubmit={handleSubmit}>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">I am a</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    className={`py-3 px-4 border rounded-md flex items-center justify-center transition-colors ${
-                      role === "entrepreneur"
-                        ? "border-primary-500 bg-primary-50 text-primary-700"
-                        : "border-gray-300 text-gray-700 hover:bg-gray-50"
-                    }`}
-                    onClick={(e: React.MouseEvent<HTMLButtonElement>) => setRole("entrepreneur")}
-                  >
-                    <Building2 size={18} className="mr-2" />
-                    Entrepreneur
-                  </button>
-
-                  <button
-                    type="button"
-                    className={`py-3 px-4 border rounded-md flex items-center justify-center transition-colors ${
-                      role === "investor"
-                        ? "border-primary-500 bg-primary-50 text-primary-700"
-                        : "border-gray-300 text-gray-700 hover:bg-gray-50"
-                    }`}
-                    onClick={(e: React.MouseEvent<HTMLButtonElement>) => setRole("investor")}
-                  >
-                    <CircleDollarSign size={18} className="mr-2" />
-                    Investor
-                  </button>
-                </div>
-              </div>
-
-              <Input
-                label="Email address"
-                type="email"
-                value={email}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
-                required
-                fullWidth
-                startAdornment={<User size={18} />}
-              />
-
-              <Input
-                label="Password"
-                type="password"
-                value={password}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
-                required
-                fullWidth
-              />
-
-              <div className="flex items-center justify-between">
-                <div className="flex items-center">
-                  <input
-                    id="remember-me"
-                    name="remember-me"
-                    type="checkbox"
-                    className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
-                  />
-                  <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-900">
-                    Remember me
-                  </label>
-                </div>
-
-                <div className="text-sm">
-                  <a href="#" className="font-medium text-primary-600 hover:text-primary-500">
-                    Forgot your password?
-                  </a>
-                </div>
-              </div>
-
-              <Button type="submit" fullWidth isLoading={isLoading || isSendingOTP} leftIcon={<LogIn size={18} />}>
-                {isSendingOTP ? "Sending OTP..." : "Sign in"}
-              </Button>
-            </form>
-          ) : (
-            <form className="space-y-6" onSubmit={handleOTPVerification}>
-              <div className="text-center">
-                <div className="text-sm text-gray-600 mb-4">
-                  Signed in as: <span className="font-medium">{email}</span>
-                </div>
-                <OTPInput value={otpCode} onChange={setOtpCode} />
-              </div>
-
-              <Button type="submit" fullWidth isLoading={isVerifyingOTP} disabled={otpCode.length !== 6}>
-                Verify Code
-              </Button>
-
-              <div className="text-center space-y-2">
-                <button
-                  type="button"
-                  onClick={handleResendOTP}
-                  disabled={isSendingOTP}
-                  className="text-sm text-primary-600 hover:text-primary-500 disabled:opacity-50"
-                >
-                  {isSendingOTP ? "Sending..." : "Resend Code"}
-                </button>
-                <br />
-                <button type="button" onClick={resetTwoFA} className="text-sm text-primary-600 hover:text-primary-500">
-                  ← Back to login
-                </button>
-              </div>
-            </form>
-          )}
-
-          {!showTwoFA && (
-            <>
-              <div className="mt-6">
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-gray-300"></div>
-                  </div>
-                  <div className="relative flex justify-center text-sm">
-                    <span className="px-2 bg-white text-gray-500">Demo Accounts</span>
-                  </div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <Button
-                    variant="outline"
-                    onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
-                      const demoCredentials = fillDemoCredentials("entrepreneur")
-                      setEmail(demoCredentials.email)
-                      setPassword(demoCredentials.password)
-                    }}
-                    leftIcon={<Building2 size={16} />}
-                  >
-                    Entrepreneur Demo
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
-                      const demoCredentials = fillDemoCredentials("investor")
-                      setEmail(demoCredentials.email)
-                      setPassword(demoCredentials.password)
-                    }}
-                    leftIcon={<CircleDollarSign size={16} />}
-                  >
-                    Investor Demo
-                  </Button>
-                </div>
-              </div>
-
-              <div className="mt-6">
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-gray-300"></div>
-                  </div>
-                  <div className="relative flex justify-center text-sm">
-                    <span className="px-2 bg-white text-gray-500">Or</span>
-                  </div>
-                </div>
-
-                <div className="mt-2 text-center">
-                  <p className="text-sm text-gray-600">
-                    Don't have an account?{" "}
-                    <Link to="/register" className="font-medium text-primary-600 hover:text-primary-500">
-                      Sign up
-                    </Link>
-                  </p>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  )
+export const useAuth = (): AuthContextType => {
+  const context = useContext(AuthContext)
+  if (context === undefined) {
+    throw new Error("useAuth must be used within an AuthProvider")
+  }
+  return context
 }
